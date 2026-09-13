@@ -1,5 +1,3 @@
-/
-
 Readme · MD
 
 # Airflow Financial Data Pipeline
@@ -46,32 +44,32 @@ Airflow owns ingestion and orchestration; dbt owns SQL transformation and data q
 - Runs as its own Docker Compose service (`dbt`), built from a plain `python:3.11-slim` image (the official `ghcr.io/dbt-labs/dbt-postgres` image has no arm64/Apple Silicon build)
 - Connects to the same `financial_pipeline` database Airflow loads into, targeting an `analytics` schema (kept separate from the raw `public` schema)
 - Run commands inside the container, e.g.:
-  ```bash
-  docker compose exec dbt dbt debug
-  docker compose exec dbt dbt run
-  docker compose exec dbt dbt test
-  ```
+    ```bash
+    docker compose exec dbt dbt debug
+    docker compose exec dbt dbt run
+    docker compose exec dbt dbt test
+    ```
 
 ## Additional DAGs (Day 7-8)
 
 Beyond the main `financial_pipeline_dynamic` pipeline, this repo includes two focused DAGs that each demonstrate one Airflow concept in isolation, since these are common interview topics and easier to reason about separately from the full pipeline:
 
-| DAG            | Concept                | What it demonstrates                                                                                                                                                                                                                                                                                                                              |
-| -------------- | ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `sensor_demo`   | **Sensors**              | A `FileSensor` polls for a file's arrival (`poke_interval=10s`) rather than assuming the file already exists, mirroring how a real pipeline would wait on an upstream system.                                                                                                                                                                     |
-| `backfill_demo` | **Backfill / Catchup**   | Demonstrates that a DAG Run's `data_interval_start` — not its actual execution time — determines which date it processes. Running `airflow backfill create --from-date ... --to-date ...` regenerates historical runs on demand, confirmed by task logs showing the target date (e.g. `2026-08-25`) even though the run executed on `2026-09-01`. |
+| DAG             | Concept                | What it demonstrates                                                                                                                                                                                                                                                                                                                              |
+| --------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sensor_demo`   | **Sensors**            | A `FileSensor` polls for a file's arrival (`poke_interval=10s`) rather than assuming the file already exists, mirroring how a real pipeline would wait on an upstream system.                                                                                                                                                                     |
+| `backfill_demo` | **Backfill / Catchup** | Demonstrates that a DAG Run's `data_interval_start` — not its actual execution time — determines which date it processes. Running `airflow backfill create --from-date ... --to-date ...` regenerates historical runs on demand, confirmed by task logs showing the target date (e.g. `2026-08-25`) even though the run executed on `2026-09-01`. |
 
 ## DAG: `financial_pipeline_dynamic`
 
 This is the main pipeline. An earlier, non-dynamic version (`financial_pipeline`, with a hardcoded `pick_target_file` step) was retired once dynamic task mapping replaced it — everything below reflects the current, only-running DAG.
 
-| Task        | Description                                                                                                                                                                                                                     |
-| ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `list_files`  | Scans `data/` for source CSVs (filters out `clean_*`/`rejected_*` derivatives)                                                                                                                                                    |
-| `extract`     | `.expand()`s over every file found; loads each into a pandas DataFrame and logs its row count                                                                                                                                     |
-| `validate`    | `.expand()`s per file; checks schema conformity, missing values (`amount`, `customer_id`), and negative amounts. Pushes a report to a dedicated XCom key (`validation_report`) and inserts one row per file into `pipeline_run_metrics` |
-| `transform`   | `.expand()`s per file; splits rows into clean and rejected sets, tags rejected rows with a `rejection_reason`, writes both to separate CSVs                                                                                       |
-| `load_all`    | Reduces the mapped per-file results back into a single task; bulk-loads all clean rows into `transactions` and rejected rows into `rejected_transactions` via `PostgresHook` (`chunksize=10000, method="multi"`), append-only    |
+| Task         | Description                                                                                                                                                                                                                             |
+| ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `list_files` | Scans `data/` for source CSVs (filters out `clean_*`/`rejected_*` derivatives)                                                                                                                                                          |
+| `extract`    | `.expand()`s over every file found; loads each into a pandas DataFrame and logs its row count                                                                                                                                           |
+| `validate`   | `.expand()`s per file; checks schema conformity, missing values (`amount`, `customer_id`), and negative amounts. Pushes a report to a dedicated XCom key (`validation_report`) and inserts one row per file into `pipeline_run_metrics` |
+| `transform`  | `.expand()`s per file; splits rows into clean and rejected sets, tags rejected rows with a `rejection_reason`, writes both to separate CSVs                                                                                             |
+| `load_all`   | Reduces the mapped per-file results back into a single task; bulk-loads all clean rows into `transactions` and rejected rows into `rejected_transactions` via `PostgresHook` (`chunksize=10000, method="multi"`), append-only           |
 
 `extract`, `validate`, and `transform` fan out automatically over however many CSV files exist in `data/` — no DAG code changes needed as file count grows. `validate` also demonstrates **explicit XCom usage** (`ti.xcom_push(key=..., value=...)`) alongside TaskFlow's automatic return-value XCom, to push a structured report under its own key rather than overloading the task's return value.
 
@@ -98,34 +96,34 @@ Every file has the same small, realistic error rate injected directly into it �
 
 ## Result
 
-> The counts below are from an early validation run against a small (500-row-per-file) synthetic dataset, kept here as a record that the append-only and dynamic-mapping behavior work as intended. The project has since scaled up to 100 files × 50,000 rows (5,000,000 rows total, ~1%/0.5% error rates spread across every file — see [Data](#data)); this section will be refreshed with current-scale numbers once dbt's data quality layer is in place to validate them properly.
+Current scale: 100 source files × 50,000 rows each (5,000,000 rows), with ~1% missing-amount and ~0.5% negative-amount errors injected independently into every file (see [Data](#data)).
 
-Running the pipeline against `transactions_dirty.csv` (200 rows, with injected issues):
-
-- Validation detected 12 rows with missing `amount` and 3 rows with negative `amount` (15 rows total flagged)
-- Transform split the data into clean and rejected sets, tagging each rejected row with a `rejection_reason`
-- Load appended the clean rows to `transactions` and the rejected rows to `rejected_transactions`, so re-running the DAG accumulates history in both tables rather than overwriting it
-  `transactions` reflects two accumulated runs against `transactions_dirty.csv` (185 clean rows each); `rejected_transactions` was introduced in this iteration, so it currently reflects one run:
+**Dynamic Task Mapping** fans out `extract`/`validate`/`transform` over all 100 files with no hardcoded file list, then `load_all` bulk-loads the results:
 
 ```sql
-SELECT COUNT(*) FROM transactions;
--- 370  (185 clean rows × 2 runs, confirming append-only behavior)
-
-SELECT COUNT(*) FROM rejected_transactions;
--- 15   (12 missing amount + 3 negative amount, from the latest run)
+SELECT COUNT(*) FROM transactions;          -- 4,925,372  (clean rows)
+SELECT COUNT(*) FROM rejected_transactions; --   160,695  (missing/negative amount)
 ```
 
-**Dynamic Task Mapping** (`financial_pipeline_dynamic`) was verified against all four source files at once, after resetting both tables:
+**Reprocessing / dedup (PRD scenario B)** — the DAG was re-triggered against the same 100 files a second time. `transactions` is append-only by design, so it doubled at the raw layer:
 
 ```sql
-SELECT COUNT(*) FROM transactions;
--- 1685  (500 + 500 + 500 + 185 clean rows across all four files)
-
-SELECT COUNT(*) FROM rejected_transactions;
--- 15    (all from transactions_dirty.csv, the only file with injected issues)
+SELECT COUNT(*) AS total_rows, COUNT(DISTINCT transaction_id) AS unique_ids
+FROM transactions;
+-- total_rows: 10,540,112   unique_ids: 4,925,372
 ```
 
-This confirms `extract`/`validate`/`transform` correctly fanned out over all four files without any hardcoded file selection.
+Rebuilding the dbt layer against this duplicated raw data confirms the staging `DISTINCT ON (transaction_id)` dedup absorbs it completely — `fct_transactions` lands on the unique count, not the raw count:
+
+```
+dbt run --select fct_transactions
+-- SELECT 4925372   (matches unique_ids exactly, not total_rows)
+
+dbt test --select stg_transactions fct_transactions
+-- PASS=7 WARN=0 ERROR=0 SKIP=0 TOTAL=7  (including unique_stg_transactions_transaction_id)
+```
+
+So even though the raw `transactions` table accumulates duplicate rows on every re-run, no duplicate `transaction_id` ever reaches `stg_transactions`, `int_transactions_eur`, `fct_transactions`, or the mart — confirmed both by row counts and by dbt's own `unique` test.
 
 ## Setup
 

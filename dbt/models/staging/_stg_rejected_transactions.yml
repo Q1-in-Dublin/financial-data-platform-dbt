@@ -1,0 +1,18 @@
+version: 2
+
+models:
+  - name: stg_rejected_transactions
+    description: >
+      One row per unique transaction_id rejected by Airflow's validate/transform
+      step. amount and customer_id are expected to sometimes be null or invalid
+      here — that's why the row was rejected in the first place.
+    columns:
+      - name: transaction_id
+        description: Unique transaction identifier.
+        tests:
+          - not_null
+          - unique
+      - name: rejection_reason
+        description: Why Airflow rejected this row.
+        tests:
+          - not_null

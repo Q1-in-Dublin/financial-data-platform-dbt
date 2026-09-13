@@ -1,0 +1,16 @@
+version: 2
+
+models:
+  - name: mart_daily_transaction_quality
+    description: >
+      One row per trade_date + currency combination. Summarizes daily
+      transaction volume and amount statistics per currency for analytics.
+    columns:
+      - name: trade_date
+        description: The trade date this row aggregates.
+        tests:
+          - not_null
+      - name: currency
+        description: The currency this row aggregates.
+        tests:
+          - not_null
