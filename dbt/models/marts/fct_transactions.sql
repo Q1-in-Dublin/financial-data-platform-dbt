@@ -1,2 +1,2 @@
-SELECT * FROM {{ref('int_transactions_eur')}}
+SELECT * FROM {{ref('int_transactions_eurx')}}
 
