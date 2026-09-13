@@ -125,6 +125,33 @@ dbt test --select stg_transactions fct_transactions
 
 So even though the raw `transactions` table accumulates duplicate rows on every re-run, no duplicate `transaction_id` ever reaches `stg_transactions`, `int_transactions_eur`, `fct_transactions`, or the mart — confirmed both by row counts and by dbt's own `unique` test.
 
+## Data Quality Failure Scenario
+
+`assert_fct_transactions_amount_not_negative` exists specifically as a safety net for the case Airflow's own `validate`/`transform` step can't cover: bad data landing in `transactions` by some path other than the DAG (a bug, a manual fix gone wrong, a direct DB write). To prove it actually catches that, one fake negative-amount row was inserted directly into `transactions` with `psql`, bypassing Airflow entirely:
+
+```sql
+INSERT INTO transactions (transaction_id, trade_date, customer_id, account_id, security_id, amount, currency, country)
+VALUES ('TXN-BADROW-DEMO', '2026-09-13', 'CUST9999', 'ACC999999', 'XX9999999999', -500.00, 'EUR', 'IE');
+```
+
+After rebuilding the chain (`dbt run --select stg_transactions int_transactions_eur fct_transactions`), the custom test failed as expected:
+
+```
+dbt test --select fct_transactions
+1 of 1 FAIL 1 assert_fct_transactions_amount_not_negative
+Got 1 result, configured to fail if != 0
+```
+
+**Response:** dbt's failure message only reports a count, not which rows — so the same predicate is queried directly against the model to find the offending row(s):
+
+```sql
+SELECT transaction_id, trade_date, customer_id, amount, currency
+FROM analytics.fct_transactions WHERE amount < 0;
+-- TXN-BADROW-DEMO | 2026-09-13 | CUST9999 | -500 | EUR
+```
+
+The fake row was deleted from the raw table, `fct_transactions` was rebuilt, and the test passed again — confirming the test is neither a false positive nor a false negative. Following PRD's quality principle, the bad row was investigated and removed rather than the test being loosened or the failure ignored.
+
 ## Setup
 
 ```bash
@@ -144,7 +171,10 @@ docker compose up -d
 # 4. Create a dedicated Postgres database for pipeline data
 docker compose exec postgres psql -U airflow -c "CREATE DATABASE financial_pipeline;"
 
-# 5. Register a Postgres connection in Airflow UI
+# 5. Apply the pipeline_run_metrics schema (no migration tool wired up yet - run by hand)
+docker compose exec -T postgres psql -U airflow -d financial_pipeline < migrations/01_create_pipeline_run_metrics.sql
+
+# 6. Register a Postgres connection in Airflow UI
 # Admin > Connections > Add:
 #   Connection Id: financial_pipeline_db
 #   Connection Type: Postgres
@@ -153,6 +183,12 @@ docker compose exec postgres psql -U airflow -c "CREATE DATABASE financial_pipel
 #   Password: airflow
 #   Port: 5432
 #   Database: financial_pipeline
+
+# 7. Trigger financial_pipeline_dynamic from the Airflow UI (or `airflow dags trigger`)
+# so transactions/rejected_transactions have data for dbt to read.
+
+# 8. Run dbt: seed (fx_rates) -> staging -> intermediate -> fact -> mart, with tests
+docker compose exec dbt dbt build
 ```
 
 Airflow UI: [http://localhost:8080](http://localhost:8080) (login: `airflow` / `airflow`)
