@@ -225,9 +225,10 @@ financial-data-platform-dbt/
 
 ## What's Next
 
-Phase 2 extensions (see `PRD.md`), not yet started:
+Phase 2 extensions (see `PRD.md`):
 
-- **CI**: GitHub Actions running `dbt parse`/`dbt compile` on every push, then `dbt run`/`dbt test` against a Postgres test environment
+- ~~CI: `dbt parse`/`dbt compile` on every push and PR~~ done — see `.github/workflows/dbt-ci.yml` (runs against an ephemeral Postgres service; verified it actually catches a broken `ref()` before merge)
+- **CI, part 2**: extend the same workflow to run `dbt run`/`dbt test` (not just parse/compile) against that Postgres service
 - **Ingestion idempotency**: add `loaded_at`, `source_file`, `ingestion_batch_id` to the raw load so reprocessing is detectable upstream too, not just deduplicated downstream by dbt
 - **Incremental models**: convert `stg_transactions`/`fct_transactions` to incremental materialization once full-refresh time becomes a bottleneck at this data volume
 - Unit tests for `transform`/`validate` logic
