@@ -2,6 +2,8 @@ Readme · MD
 
 # Airflow Financial Data Pipeline
 
+[![dbt CI](https://github.com/Q1-in-Dublin/financial-data-platform-dbt/actions/workflows/dbt-ci.yml/badge.svg)](https://github.com/Q1-in-Dublin/financial-data-platform-dbt/actions/workflows/dbt-ci.yml)
+
 A local, end-to-end ETL pipeline built with **Apache Airflow 3.x** and **PostgreSQL**, using synthetic financial transaction data. This project was built as a hands-on portfolio piece to demonstrate practical Airflow orchestration skills for a Data Engineer role transition.
 
 ## Project Purpose
