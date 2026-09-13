@@ -11,3 +11,17 @@ logs/
 # OS
 .DS_Store
 config/airflow.cfg
+
+# Local docs
+PRD.md
+dbt-concepts-guide.pdf
+
+# Generated synthetic data (regenerate with src/generate_data.py)
+data/*.csv
+
+# Tooling cache
+.serena/
+dbt/.user.yml
+
+
+#

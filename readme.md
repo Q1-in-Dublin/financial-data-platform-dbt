@@ -24,39 +24,56 @@ CSV files (Faker-generated)
    Transform → split into clean vs. rejected records
       ↓
    Load      → append clean rows to `transactions`, rejected rows to `rejected_transactions`
+      ↓
+   dbt (separate service, run independently of the DAG)
+      ↓
+   source → staging → mart models, schema tests, business rule tests
 ```
 
 ## Tech Stack
 
 - **Apache Airflow 3.3.0** (Docker Compose, official quick-start setup)
 - **PostgreSQL 16** (separate `financial_pipeline` database, isolated from Airflow's own metadata DB)
+- **dbt-postgres 1.8.2** (Docker service, custom-built image — see `dbt/`) — SQL transformation and data quality layer on top of the raw `transactions`/`rejected_transactions` tables
 - **Python** — pandas, Faker, SQLAlchemy
 - **TaskFlow API** (`@dag`, `@task` decorators)
 
+## dbt Layer
+
+Airflow owns ingestion and orchestration; dbt owns SQL transformation and data quality on the same `financial_pipeline` Postgres database. This is a deliberate separation of responsibilities — see `PRD.md` for the full design rationale.
+
+- Project lives under `dbt/` (`dbt_project.yml`, `profiles.yml`, `Dockerfile`, `macros/`)
+- Runs as its own Docker Compose service (`dbt`), built from a plain `python:3.11-slim` image (the official `ghcr.io/dbt-labs/dbt-postgres` image has no arm64/Apple Silicon build)
+- Connects to the same `financial_pipeline` database Airflow loads into, targeting an `analytics` schema (kept separate from the raw `public` schema)
+- Run commands inside the container, e.g.:
+  ```bash
+  docker compose exec dbt dbt debug
+  docker compose exec dbt dbt run
+  docker compose exec dbt dbt test
+  ```
+
 ## Additional DAGs (Day 7-8)
 
-Beyond the main `financial_pipeline`, this repo includes three focused DAGs that each demonstrate one Airflow concept in isolation, since these are common interview topics and easier to reason about separately from the full pipeline:
+Beyond the main `financial_pipeline_dynamic` pipeline, this repo includes two focused DAGs that each demonstrate one Airflow concept in isolation, since these are common interview topics and easier to reason about separately from the full pipeline:
 
-| DAG                          | Concept                  | What it demonstrates                                                                                                                                                                                                                                                                                                                              |
-| ---------------------------- | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `financial_pipeline_dynamic` | **Dynamic Task Mapping** | `extract`, `validate`, and `transform` use `.expand()` to automatically fan out over however many CSV files exist in `data/`, with no DAG code changes needed as file count grows. `load_all` then reduces the mapped results back into a single load step.                                                                                       |
-| `sensor_demo`                | **Sensors**              | A `FileSensor` polls for a file's arrival (`poke_interval=10s`) rather than assuming the file already exists, mirroring how a real pipeline would wait on an upstream system.                                                                                                                                                                     |
-| `backfill_demo`              | **Backfill / Catchup**   | Demonstrates that a DAG Run's `data_interval_start` — not its actual execution time — determines which date it processes. Running `airflow backfill create --from-date ... --to-date ...` regenerates historical runs on demand, confirmed by task logs showing the target date (e.g. `2026-08-25`) even though the run executed on `2026-09-01`. |
+| DAG            | Concept                | What it demonstrates                                                                                                                                                                                                                                                                                                                              |
+| -------------- | ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sensor_demo`   | **Sensors**              | A `FileSensor` polls for a file's arrival (`poke_interval=10s`) rather than assuming the file already exists, mirroring how a real pipeline would wait on an upstream system.                                                                                                                                                                     |
+| `backfill_demo` | **Backfill / Catchup**   | Demonstrates that a DAG Run's `data_interval_start` — not its actual execution time — determines which date it processes. Running `airflow backfill create --from-date ... --to-date ...` regenerates historical runs on demand, confirmed by task logs showing the target date (e.g. `2026-08-25`) even though the run executed on `2026-09-01`. |
 
-## DAG: `financial_pipeline`
+## DAG: `financial_pipeline_dynamic`
 
-| Task               | Description                                                                                                                                                                                                 |
-| ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `list_files`       | Scans `data/` directory for CSV files                                                                                                                                                                       |
-| `pick_target_file` | Selects the target file to process                                                                                                                                                                          |
-| `extract`          | Loads CSV into a pandas DataFrame, logs row count                                                                                                                                                           |
-| `validate`         | Checks schema conformity, missing values (`amount`, `customer_id`), and negative amounts; pushes the validation report to a dedicated XCom key (`validation_report`), separate from the task's return value |
-| `transform`        | Splits rows into clean and rejected sets (missing critical fields or negative amounts), tagging rejected rows with a `rejection_reason`, and writes both to separate CSVs                                   |
-| `load`             | Loads clean rows into `transactions` and rejected rows into `rejected_transactions`, both via `PostgresHook`, using append-only writes so each run adds to history rather than overwriting it               |
+This is the main pipeline. An earlier, non-dynamic version (`financial_pipeline`, with a hardcoded `pick_target_file` step) was retired once dynamic task mapping replaced it — everything below reflects the current, only-running DAG.
 
-Task dependencies are expressed via TaskFlow's implicit XCom chaining (function calls passing return values downstream), equivalent to `list_files >> pick_target_file >> extract >> validate >> transform >> load`.
+| Task        | Description                                                                                                                                                                                                                     |
+| ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `list_files`  | Scans `data/` for source CSVs (filters out `clean_*`/`rejected_*` derivatives)                                                                                                                                                    |
+| `extract`     | `.expand()`s over every file found; loads each into a pandas DataFrame and logs its row count                                                                                                                                     |
+| `validate`    | `.expand()`s per file; checks schema conformity, missing values (`amount`, `customer_id`), and negative amounts. Pushes a report to a dedicated XCom key (`validation_report`) and inserts one row per file into `pipeline_run_metrics` |
+| `transform`   | `.expand()`s per file; splits rows into clean and rejected sets, tags rejected rows with a `rejection_reason`, writes both to separate CSVs                                                                                       |
+| `load_all`    | Reduces the mapped per-file results back into a single task; bulk-loads all clean rows into `transactions` and rejected rows into `rejected_transactions` via `PostgresHook` (`chunksize=10000, method="multi"`), append-only    |
 
-`validate` also demonstrates **explicit XCom usage** (`ti.xcom_push(key=..., value=...)`) alongside TaskFlow's automatic return-value XCom, to push a structured report under its own key rather than overloading the task's return value.
+`extract`, `validate`, and `transform` fan out automatically over however many CSV files exist in `data/` — no DAG code changes needed as file count grows. `validate` also demonstrates **explicit XCom usage** (`ti.xcom_push(key=..., value=...)`) alongside TaskFlow's automatic return-value XCom, to push a structured report under its own key rather than overloading the task's return value.
 
 ## Data
 
@@ -73,13 +90,15 @@ Synthetic transaction data generated with the `Faker` library (`src/generate_dat
 | `currency`       | Currency (EUR/USD/GBP)        |
 | `country`        | Country code                  |
 
-Four files are generated:
+`src/generate_data.py` generates 100 files (`transactions_001.csv` … `transactions_100.csv`, 50,000 rows each — 5,000,000 rows total). `transaction_id` is a single counter shared across all files, so IDs are globally unique (no two files ever contain the same transaction).
 
-- `transactions_001.csv` / `002.csv` / `003.csv` — clean data (500 rows each)
-- `transactions_dirty.csv` — 200 rows with intentionally injected missing values and negative amounts, used to exercise the `validate` and `transform` logic
-  **Note:** No real company data, schemas, or field names are used anywhere in this project. All data is synthetic and generated locally.
+Every file has the same small, realistic error rate injected directly into it — roughly 1% missing `amount` and 0.5% negative `amount` per file — rather than concentrating all bad rows into one dedicated "dirty" file. This forces `validate`/`transform` to actually filter each batch on its contents, not on which file it happens to be.
+
+**Note:** No real company data, schemas, or field names are used anywhere in this project. All data is synthetic and generated locally.
 
 ## Result
+
+> The counts below are from an early validation run against a small (500-row-per-file) synthetic dataset, kept here as a record that the append-only and dynamic-mapping behavior work as intended. The project has since scaled up to 100 files × 50,000 rows (5,000,000 rows total, ~1%/0.5% error rates spread across every file — see [Data](#data)); this section will be refreshed with current-scale numbers once dbt's data quality layer is in place to validate them properly.
 
 Running the pipeline against `transactions_dirty.csv` (200 rows, with injected issues):
 
@@ -143,33 +162,36 @@ Airflow UI: [http://localhost:8080](http://localhost:8080) (login: `airflow` / `
 ## Repository Structure
 
 ```
-airflow-financial-data-pipeline/
+financial-data-platform-dbt/
 ├── dags/
-│   ├── financial_pipeline.py
-│   ├── financial_pipeline_dynamic.py   # Dynamic Task Mapping
+│   ├── financial_pipeline_dynamic.py   # Dynamic Task Mapping (main pipeline)
 │   ├── sensor_demo.py                  # Sensors
 │   └── backfill_demo.py                # Backfill / Catchup
+├── dbt/
+│   ├── dbt_project.yml
+│   ├── profiles.yml
+│   ├── Dockerfile                      # dbt-postgres, built locally (no arm64 official image)
+│   └── macros/
+├── migrations/                         # hand-run SQL, no migration tool wired up yet
 ├── src/
-│   └── generate_data.py
+│   └── generate_data.py                # 100 files x 50,000 rows, globally unique transaction_id
 ├── data/
-│   ├── transactions_001.csv
-│   ├── transactions_002.csv
-│   ├── transactions_003.csv
-│   └── transactions_dirty.csv
+│   └── transactions_001.csv … transactions_100.csv
 ├── config/
 ├── plugins/
+├── docs/
 ├── tests/            # planned
-├── docker-compose.yaml
+├── docker-compose.yaml                 # postgres, redis, airflow-*, dbt
+├── PRD.md                              # full design doc (gitignored, local only)
 ├── .gitignore
 └── README.md
 ```
 
 ## What's Next
 
-- **Upsert logic** — key rows by `transaction_id` so reprocessing the same source data doesn't create duplicates (the current `financial_pipeline` and `financial_pipeline_dynamic` DAGs are append-only, so re-running them accumulates history rather than deduplicating)
-- **Merge `financial_pipeline_dynamic`'s mapping approach into the main pipeline**, replacing the single hardcoded target file
+- **dbt staging dedup** — `financial_pipeline_dynamic` stays append-only by design (see `PRD.md`); deduplication on `transaction_id` now happens downstream in the dbt staging layer instead of at load time
+- **dbt source → staging → intermediate → fact → mart models**, schema tests and business rule tests (in progress — see `dbt/` and `PRD.md`)
 - Unit tests for `transform`/`validate` logic
-- Optional: swap the CSV extract step for a public API call (e.g. FX rates) to demonstrate API integration
 - Optional: package the local Docker Compose setup more formally for one-command reproducibility
 
 ## Learning Context

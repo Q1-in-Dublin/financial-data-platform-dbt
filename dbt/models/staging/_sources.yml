@@ -1,0 +1,11 @@
+version: 2
+# Explaination for dbt about airflow
+sources:
+    - name: raw
+      schema: public
+      description: Raw tables loaded by the Airflow financial_pipeline_dynamic DAG.
+      tables:
+          - name: transactions
+            description: Clean transactions as loaded by Airflow (append-only, may contain duplicate transaction_id across re-runs).
+          - name: rejected_transactions
+            description: Transactions rejected by Airflow's validate/transform step (missing or negative amount).

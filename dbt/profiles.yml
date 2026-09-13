@@ -1,0 +1,12 @@
+financial_data_platform:
+  target: dev
+  outputs:
+    dev:
+      type: postgres
+      host: "{{ env_var('POSTGRES_HOST', 'postgres') }}"
+      user: "{{ env_var('POSTGRES_USER', 'airflow') }}"
+      password: "{{ env_var('POSTGRES_PASSWORD', 'airflow') }}"
+      port: 5432
+      dbname: "{{ env_var('POSTGRES_DB', 'financial_pipeline') }}"
+      schema: analytics
+      threads: 4

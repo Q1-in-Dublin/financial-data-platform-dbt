@@ -1,0 +1,10 @@
+version: 2
+models:
+    - name: int_transactions_eur
+      columns:
+          - name: transaction_id
+          # not_null : not need
+          # unique : not nee
+          - name: amount_eur
+            tests:
+                - not_null

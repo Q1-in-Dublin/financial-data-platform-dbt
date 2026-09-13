@@ -1,0 +1,31 @@
+version: 2
+
+models:
+  - name: stg_transactions
+    description: >
+      One row per unique transaction_id. Deduplicated from the raw
+      public.transactions table and normalized (types cast, currency/country
+      uppercased). This is the stable interface downstream models build on.
+    columns:
+      - name: transaction_id
+        description: Unique transaction identifier.
+        tests:
+          - not_null
+          - unique
+      - name: trade_date
+        description: Date the trade was executed.
+        tests:
+          - not_null
+      - name: customer_id
+        description: Customer identifier.
+        tests:
+          - not_null
+      - name: amount
+        description: Transaction amount in its original currency.
+        tests:
+          - not_null
+      - name: currency
+        description: ISO-style currency code.
+        tests:
+          - accepted_values:
+              values: ['EUR', 'USD', 'GBP']

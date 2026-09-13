@@ -301,6 +301,22 @@ services:
             _PIP_ADDITIONAL_REQUIREMENTS: ''
         user: '0:0'
 
+    dbt:
+        build: ./dbt
+        environment:
+            POSTGRES_HOST: postgres
+            POSTGRES_USER: airflow
+            POSTGRES_PASSWORD: airflow
+            POSTGRES_DB: financial_pipeline
+            DBT_PROFILES_DIR: /usr/app/dbt
+        volumes:
+            - ${AIRFLOW_PROJ_DIR:-.}/dbt:/usr/app/dbt
+        working_dir: /usr/app/dbt
+        depends_on:
+            postgres:
+                condition: service_healthy
+        restart: unless-stopped
+
     airflow-cli:
         <<: *airflow-common
         profiles:

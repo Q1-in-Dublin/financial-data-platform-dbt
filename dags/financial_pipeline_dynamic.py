@@ -1,8 +1,8 @@
 from airflow.sdk import dag, task
-from datetime import datetime
+from datetime import datetime, timezone
 import pandas as pd
 import os
-
+from airflow.providers.postgres.hooks.postgres import PostgresHook
 DATA_DIR = "/opt/airflow/data"
 POSTGRES_CONN_ID = "financial_pipeline_db"
 
@@ -44,6 +44,14 @@ def financial_pipeline_dynamic():
             "security_id", "amount", "currency", "country",
         ]
 
+        total_rows = len(df)
+        missing_amount = int(df["amount"].isna().sum())
+        missing_customer_id = int(df["customer_id"].isna().sum())
+        negative_amount = int((df["amount"] < 0).sum())
+        rejected_rows = int((df["amount"].isna() | df["customer_id"].isna() | (df["amount"] < 0)).sum())
+        rejection_rate = rejected_rows / total_rows if total_rows > 0 else 0.0
+
+
         report = {
             "filename": filename,
             "total_rows": len(df),
@@ -57,6 +65,31 @@ def financial_pipeline_dynamic():
 
         ti = context["ti"]
         ti.xcom_push(key="validation_report", value=report)
+        execution_date = context["dag_run"].logical_date or datetime.now(timezone.utc)
+
+        hook = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
+        hook.run(
+            """
+            INSERT INTO pipeline_run_metrics (
+                run_id, dag_id, execution_date, file_name, total_rows,
+                missing_amount_count, missing_customer_id_count,
+                negative_amount_count, rejection_rate
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (run_id, file_name) DO NOTHING
+            """,
+            parameters=(
+                context["run_id"],
+                context["dag"].dag_id,
+                execution_date,
+                filename,
+                total_rows,
+                missing_amount,
+                missing_customer_id,
+                negative_amount,
+                rejection_rate,
+            ),
+        )
 
         return filename
 
@@ -85,7 +118,7 @@ def financial_pipeline_dynamic():
 
     @task
     def load_all(file_info: list):
-        from airflow.providers.postgres.hooks.postgres import PostgresHook
+        
 
         hook = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
         engine = hook.get_sqlalchemy_engine()
@@ -97,13 +130,13 @@ def financial_pipeline_dynamic():
             clean_df = pd.read_csv(clean_path)
             
             if len(clean_df) > 0:
-                clean_df.to_sql("transactions", engine, if_exists="append", index=False)
+                clean_df.to_sql("transactions", engine, if_exists="append", index=False, chunksize=10000, method="multi")
                 total_clean += len(clean_df)
 
             rejected_path = os.path.join(DATA_DIR, info["rejected"])
             rejected_df = pd.read_csv(rejected_path)
             if len(rejected_df) > 0:
-                rejected_df.to_sql("rejected_transactions", engine, if_exists="append", index=False)
+                rejected_df.to_sql("rejected_transactions", engine, if_exists="append", index=False, chunksize=10000, method="multi")
                 total_rejected += len(rejected_df)
 
     files = list_files()

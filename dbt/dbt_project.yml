@@ -1,0 +1,28 @@
+name: 'financial_data_platform'
+version: '1.0.0'
+config-version: 2
+
+profile: 'financial_data_platform'
+
+model-paths: ['models']
+test-paths: ['tests']
+macro-paths: ['macros']
+
+target-path: 'target'
+clean-targets:
+    - 'target'
+    - 'dbt_packages'
+
+models:
+    financial_data_platform:
+        staging:
+            +materialized: view
+            +schema: analytics
+        marts:
+            +materialized: table
+            +schema: analytics
+seeds:
+    financial_data_platform:
+        fx_rates:
+            +column_types:
+                rate_to_eur: numeric(10,4)
