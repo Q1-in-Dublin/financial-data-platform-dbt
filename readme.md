@@ -187,8 +187,11 @@ financial-data-platform-dbt/
 
 ## What's Next
 
-- **dbt staging dedup** — `financial_pipeline_dynamic` stays append-only by design (see `PRD.md`); deduplication on `transaction_id` now happens downstream in the dbt staging layer instead of at load time
-- **dbt source → staging → intermediate → fact → mart models**, schema tests and business rule tests (in progress — see `dbt/` and `PRD.md`)
+Phase 2 extensions (see `PRD.md`), not yet started:
+
+- **CI**: GitHub Actions running `dbt parse`/`dbt compile` on every push, then `dbt run`/`dbt test` against a Postgres test environment
+- **Ingestion idempotency**: add `loaded_at`, `source_file`, `ingestion_batch_id` to the raw load so reprocessing is detectable upstream too, not just deduplicated downstream by dbt
+- **Incremental models**: convert `stg_transactions`/`fct_transactions` to incremental materialization once full-refresh time becomes a bottleneck at this data volume
 - Unit tests for `transform`/`validate` logic
 - Optional: package the local Docker Compose setup more formally for one-command reproducibility
 
